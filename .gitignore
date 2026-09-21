@@ -1,5 +1,21 @@
+# Segredos e configuração local
 .env
-.vscode
-__pycache__
-files.zip
+
+# Banco de dados e dados de usuário (não versionar vendas/tokens reais)
 bot.db
+bot.db-wal
+bot.db-shm
+acessos.json
+files.zip
+
+# Python
+__pycache__/
+*.pyc
+venv/
+.venv/
+*.egg-info/
+
+# Editores / SO
+.vscode/
+.idea/
+.DS_Store
