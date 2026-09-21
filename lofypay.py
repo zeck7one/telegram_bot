@@ -6,7 +6,7 @@ import qrcode
 import requests
 
 from config import LOFYPAY_API_KEY, LOFYPAY_BASE_URL, ACCESS_LINK, PRIVATE_GROUP_ID, BOT_USERNAME
-from storage import carregar_tokens, salvar_tokens
+from storage import registrar_token, atualizar_status_transacao
 
 HEADERS = {
     "Content-Type": "application/json",
@@ -81,9 +81,7 @@ def gerar_link_acesso(bot, id_transaction):
             return ACCESS_LINK
 
     if ACCESS_LINK and BOT_USERNAME:
-        tokens = carregar_tokens()
-        tokens[id_transaction] = {"usado": False}
-        salvar_tokens(tokens)
+        registrar_token(id_transaction)
         return f"https://t.me/{BOT_USERNAME}?start=acesso_{id_transaction}"
 
     return ACCESS_LINK
@@ -102,6 +100,7 @@ def poll_pagamento(bot, chat_id, id_transaction, timeout_seg=600, intervalo=10):
 
         status = resultado.get("status")
         if status == "PAID_OUT":
+            atualizar_status_transacao(id_transaction, status)
             link = gerar_link_acesso(bot, id_transaction)
             texto = f"✅ Pagamento confirmado!\nidTransaction: {id_transaction}"
             if link:
@@ -111,6 +110,7 @@ def poll_pagamento(bot, chat_id, id_transaction, timeout_seg=600, intervalo=10):
             bot.send_message(chat_id, texto)
             return
         if status in ("EXPIRED", "FAILED", "REFUNDED"):
+            atualizar_status_transacao(id_transaction, status)
             bot.send_message(chat_id, f"❌ PIX não foi concluído (status: {status}).\nidTransaction: {id_transaction}")
             return
 

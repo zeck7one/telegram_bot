@@ -8,7 +8,7 @@ from lofypay import (
     gerar_pix, consultar_status_pix, simular_pagamento_pix,
     gerar_qrcode_imagem, poll_pagamento,
 )
-from storage import carregar_tokens, salvar_tokens
+from storage import token_info, marcar_token_usado, registrar_transacao, resumo_vendas
 
 TEXTO_HELP = '''
 Comandos disponíveis:
@@ -19,6 +19,7 @@ Comandos disponíveis:
 /pix <valor> [nome] - Gera uma cobrança PIX
 /statuspix <idTransaction> - Consulta o status de um pagamento
 /simularpix <idTransaction> [status] - Simula pagamento no sandbox (só sk_test_)
+/relatorio - Mostra total de vendas confirmadas
 Exemplo: /cotacao USD BRL
 Exemplo: /pix 25.90 Pedro Santos
 '''
@@ -60,8 +61,7 @@ def registrar_handlers(bot):
 
         if len(args) == 2 and args[1].startswith("acesso_"):
             id_transaction = args[1][len("acesso_"):]
-            tokens = carregar_tokens()
-            registro = tokens.get(id_transaction)
+            registro = token_info(id_transaction)
 
             if not registro:
                 bot.send_message(messagem.chat.id, "❌ Link inválido.")
@@ -70,8 +70,11 @@ def registrar_handlers(bot):
                 bot.send_message(messagem.chat.id, "⚠️ Esse link já foi utilizado e não é mais válido.")
                 return
 
-            registro["usado"] = True
-            salvar_tokens(tokens)
+            if not marcar_token_usado(id_transaction):
+                # outra requisição já marcou como usado entre a checagem e agora
+                bot.send_message(messagem.chat.id, "⚠️ Esse link já foi utilizado e não é mais válido.")
+                return
+
             bot.send_message(messagem.chat.id, f"🔓 Aqui está seu acesso:\n{ACCESS_LINK}")
             return
 
@@ -122,6 +125,8 @@ def registrar_handlers(bot):
             id_transaction = resultado["idTransaction"]
             codigo = resultado["paymentCode"]
             qr_base64 = resultado.get("paymentCodeBase64")
+
+            registrar_transacao(id_transaction, messagem.chat.id, valor, nome)
 
             bot.send_message(
                 messagem.chat.id,
@@ -188,6 +193,14 @@ def registrar_handlers(bot):
             bot.send_message(messagem.chat.id, f"Status: {status}")
         except Exception as e:
             bot.send_message(messagem.chat.id, f"Ocorreu um erro: {e}")
+
+    @bot.message_handler(commands=['relatorio'])
+    def relatorio(messagem):
+        resumo = resumo_vendas()
+        bot.send_message(
+            messagem.chat.id,
+            f"📊 Vendas confirmadas: {resumo['quantidade']}\n💰 Total: R$ {resumo['total']:.2f}"
+        )
 
     @bot.message_handler(func=lambda m: True)
     def fallback(messagem):

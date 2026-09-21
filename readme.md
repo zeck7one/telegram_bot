@@ -17,3 +17,7 @@ async def do_something():
 
 asyncio.run(do_something())    
 # SEE DOCUMENTATION FOR MOREv
+
+
+OBS: o arquivo file.zip eo que vai para a producao quando for
+configurado um webholk
