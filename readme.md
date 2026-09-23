@@ -1,6 +1,6 @@
 OBS: o arquivo file.zip eo que vai para a producao quando for
 configurado um webholk
-PROJETO EXECULTADO COM O Python 3.14.7
+PROJETO EXECULTADO COM O Python 3.13
 ====================================================================
 # Bot do Telegram — Cotação + PIX (LofyPay)
 

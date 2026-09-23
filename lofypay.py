@@ -7,6 +7,7 @@ import requests
 
 from config import LOFYPAY_API_KEY, LOFYPAY_BASE_URL, ACCESS_LINK, PRIVATE_GROUP_ID, BOT_USERNAME
 from storage import registrar_token, atualizar_status_transacao
+from styles import card, status_emoji, status_label
 
 HEADERS = {
     "Content-Type": "application/json",
@@ -99,23 +100,55 @@ def poll_pagamento(bot, chat_id, id_transaction, timeout_seg=600, intervalo=10):
             continue
 
         status = resultado.get("status")
+
         if status == "PAID_OUT":
             atualizar_status_transacao(id_transaction, status)
             link = gerar_link_acesso(bot, id_transaction)
-            texto = f"✅ Pagamento confirmado!\nidTransaction: {id_transaction}"
+
+            texto = card(
+                "Pagamento confirmado",
+                {
+                    "ID": f"<code>{id_transaction}</code>",
+                    "Status": f"{status_emoji(status)} {status_label(status)}",
+                },
+                emoji="✅",
+            )
             if link:
                 texto += f"\n\n🔓 Aqui está seu acesso:\n{link}"
             else:
                 texto += "\n\n⚠️ Pagamento ok, mas nenhum link de acesso está configurado."
-            bot.send_message(chat_id, texto)
-            return
-        if status in ("EXPIRED", "FAILED", "REFUNDED"):
-            atualizar_status_transacao(id_transaction, status)
-            bot.send_message(chat_id, f"❌ PIX não foi concluído (status: {status}).\nidTransaction: {id_transaction}")
+
+            bot.send_message(chat_id, texto, parse_mode="HTML")
             return
 
-    bot.send_message(
-        chat_id,
-        f"⏱ Parei de monitorar o PIX {id_transaction} (tempo limite atingido). "
-        f"Use /statuspix {id_transaction} para checar manualmente."
+        if status in ("EXPIRED", "FAILED", "REFUNDED"):
+            atualizar_status_transacao(id_transaction, status)
+            texto = card(
+                "PIX não concluído",
+                {
+                    "ID": f"<code>{id_transaction}</code>",
+                    "Status": f"{status_emoji(status)} {status_label(status)}",
+                },
+                emoji="❌",
+            )
+            bot.send_message(chat_id, texto, parse_mode="HTML")
+            return
+
+    # Timeout: parou de monitorar, mas a transação pode ainda ser paga depois
+    # (o gateway continua válido). Marcamos como TIMEOUT pra diferenciar de
+    # um "pending" comum no /relatorio e no storage.
+    try:
+        atualizar_status_transacao(id_transaction, "TIMEOUT")
+    except Exception:
+        pass  # se o storage não aceitar esse valor, não trava o bot por isso
+
+    texto = card(
+        "Monitoramento encerrado",
+        {
+            "ID": f"<code>{id_transaction}</code>",
+            "Status": f"{status_emoji('timeout')} {status_label('timeout')}",
+        },
+        emoji="⏱",
     )
+    texto += f"\n\nUse /statuspix {id_transaction} pra checar manualmente — o PIX ainda pode ser pago depois disso."
+    bot.send_message(chat_id, texto, parse_mode="HTML")

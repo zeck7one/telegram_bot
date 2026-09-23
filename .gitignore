@@ -7,6 +7,7 @@ bot.db-wal
 bot.db-shm
 acessos.json
 files.zip
+telegram_bot.zip
 
 # Python
 __pycache__/
