@@ -5,8 +5,12 @@ import time
 import qrcode
 import requests
 
-from config import LOFYPAY_API_KEY, LOFYPAY_BASE_URL, ACCESS_LINK, PRIVATE_GROUP_ID, BOT_USERNAME
-from storage import registrar_token, atualizar_status_transacao
+import config
+from config import LOFYPAY_API_KEY, LOFYPAY_BASE_URL, ACCESS_LINK, PRIVATE_GROUP_ID
+from storage import (
+    registrar_token, atualizar_status_transacao, buscar_transacao,
+    conceder_pagamento_uma_vez, registrar_usuario, criar_ou_renovar_assinatura,
+)
 from styles import card, status_emoji, status_label
 
 HEADERS = {
@@ -61,18 +65,22 @@ def gerar_qrcode_imagem(codigo_copia_e_cola):
     return buffer
 
 
-def gerar_link_acesso(bot, id_transaction):
+def gerar_link_acesso(bot, id_transaction, canal_id=None):
     """Retorna o link a ser enviado após confirmação do pagamento.
-    - PRIVATE_GROUP_ID configurado: convite de uso único nativo do Telegram
+    - canal_id (parâmetro): canal específico daquele produto/plano (ex: um canal VIP
+      diferente por tier). Tem prioridade sobre o PRIVATE_GROUP_ID fixo do .env.
+    - Sem canal_id, cai no PRIVATE_GROUP_ID: convite de uso único nativo do Telegram
       (member_limit=1 invalida o link sozinho depois de 1 entrada).
     - ACCESS_LINK + BOT_USERNAME configurados: deep link do bot que só libera
       o link real na 1ª vez que for clicado.
     - Só ACCESS_LINK: devolve o link cru, sem controle de uso único.
     """
-    if PRIVATE_GROUP_ID:
+    canal_alvo = canal_id or PRIVATE_GROUP_ID
+
+    if canal_alvo:
         try:
             invite = bot.create_chat_invite_link(
-                chat_id=PRIVATE_GROUP_ID,
+                chat_id=canal_alvo,
                 member_limit=1,
                 expire_date=int(time.time()) + 3600
             )
@@ -81,15 +89,45 @@ def gerar_link_acesso(bot, id_transaction):
             print(f"Erro ao gerar convite: {e}")
             return ACCESS_LINK
 
-    if ACCESS_LINK and BOT_USERNAME:
+    if ACCESS_LINK and config.BOT_USERNAME:
         registrar_token(id_transaction)
-        return f"https://t.me/{BOT_USERNAME}?start=acesso_{id_transaction}"
+        return f"https://t.me/{config.BOT_USERNAME}?start=acesso_{id_transaction}"
 
     return ACCESS_LINK
 
 
-def poll_pagamento(bot, chat_id, id_transaction, timeout_seg=600, intervalo=10):
-    """Roda em background verificando o status até PAID_OUT, expirar ou timeout."""
+def conceder_assinatura_se_necessario(bot, id_transaction, chat_id):
+    """Concede os dias de acesso do plano comprado — só na 1ª confirmação dessa
+    transação. É seguro chamar isso mais de uma vez pro mesmo id_transaction
+    (polling, clique manual em "Verificar pagamento" e reentrega de webhook podem
+    confirmar o mesmo pagamento em paralelo): só quem ganha a corrida no banco
+    concede a assinatura, as demais chamadas não fazem nada.
+    Transações sem plano/dias (ex: /pix avulso) não geram assinatura."""
+    if not conceder_pagamento_uma_vez(id_transaction):
+        return
+
+    transacao = buscar_transacao(id_transaction)
+    plano = transacao.get("produto_id") if transacao else None
+    dias = transacao.get("dias") if transacao else None
+    if not plano or not dias:
+        return  # cobrança avulsa (não é um plano VIP com validade)
+
+    try:
+        chat = bot.get_chat(chat_id)
+        nome = chat.first_name or chat.username
+        username = chat.username
+    except Exception as e:
+        print(f"Erro ao buscar dados do chat {chat_id}: {e}")
+        nome = username = None
+
+    registrar_usuario(chat_id, nome, username)
+    criar_ou_renovar_assinatura(chat_id, plano, dias)
+
+
+def poll_pagamento(bot, chat_id, id_transaction, timeout_seg=600, intervalo=10, canal_id=None):
+    """Roda em background verificando o status até PAID_OUT, expirar ou timeout.
+    canal_id: passa adiante pra gerar_link_acesso quando o produto/plano tem
+    um canal de destino específico (ex: um tier VIP diferente do PRIVATE_GROUP_ID)."""
     decorrido = 0
     while decorrido < timeout_seg:
         time.sleep(intervalo)
@@ -102,8 +140,9 @@ def poll_pagamento(bot, chat_id, id_transaction, timeout_seg=600, intervalo=10):
         status = resultado.get("status")
 
         if status == "PAID_OUT":
+            conceder_assinatura_se_necessario(bot, id_transaction, chat_id)
             atualizar_status_transacao(id_transaction, status)
-            link = gerar_link_acesso(bot, id_transaction)
+            link = gerar_link_acesso(bot, id_transaction, canal_id=canal_id)
 
             texto = card(
                 "Pagamento confirmado",
@@ -150,5 +189,5 @@ def poll_pagamento(bot, chat_id, id_transaction, timeout_seg=600, intervalo=10):
         },
         emoji="⏱",
     )
-    texto += f"\n\nUse /statuspix {id_transaction} pra checar manualmente — o PIX ainda pode ser pago depois disso."
+    texto += f"\n\nUse /verificar_pagamento {id_transaction} pra checar manualmente — o PIX ainda pode ser pago depois disso."
     bot.send_message(chat_id, texto, parse_mode="HTML")

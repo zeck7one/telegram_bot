@@ -7,8 +7,6 @@ load_dotenv()
 API_KEY = os.getenv('api_key')
 BOT_USERNAME = os.getenv('bot_username')  # sem @, usado no deep link de acesso único
 
-# Cotação de moedas
-CURRENCY_API_KEY = os.getenv('currency_api_key')
 
 # LofyPay
 LOFYPAY_API_KEY = os.getenv('lofypay_api_key')  # sk_live_... ou sk_test_...
@@ -17,6 +15,10 @@ LOFYPAY_BASE_URL = "https://app.lofypay.com/api/v1"
 # Liberação de acesso pós-pagamento
 ACCESS_LINK = os.getenv('access_link')          # link fixo (fallback)
 PRIVATE_GROUP_ID = os.getenv('private_group_id')  # canal/grupo privado (recomendado)
+
+# Seu user_id do Telegram — se configurado, só você consegue rodar /postarvip.
+# Pegue seu ID com @userinfobot. Deixe vazio pra não restringir (não recomendado).
+ADMIN_CHAT_ID = os.getenv('admin_chat_id')
 
 # Armazenamento local dos tokens de acesso único
 TOKENS_FILE = "acessos.json"
@@ -29,9 +31,7 @@ def validar():
         faltando.append("api_key")
     if not LOFYPAY_API_KEY:
         faltando.append("lofypay_api_key")
-    if not CURRENCY_API_KEY:
-        faltando.append("currency_api_key")
-
+    
     if faltando:
         raise RuntimeError(
             f"Variáveis de ambiente faltando no .env: {', '.join(faltando)}"
