@@ -62,6 +62,21 @@ private_group_id=-100xxxxxxxxxx   # recomendado: convite de uso único
 # Webhook (opcional — deixe em branco pra rodar só com polling)
 # lofypay_webhook_secret=
 # webhook_port=5000
+
+# Canal de prévias (opcional)
+# preview_channel_id=-100xxxxxxxxxx
+# preview_channel_link=https://t.me/+xxxxxxxx
+
+# Canal de mídia do banner/vídeo de prévia (opcional, recomendado)
+# O bot precisa participar desse canal. Toda foto/vídeo postado nele vira
+# automaticamente o banner/vídeo mostrado em _enviar_previa — pra trocar a
+# arte, basta postar uma nova lá (sem editar .env nem reiniciar o bot).
+# banner_source_channel_id=-100xxxxxxxxxx
+
+# Fallback fixo, só usado se banner_source_channel_id ainda não capturou nada
+# preview_banner=
+# preview_media=
+# preview_media_type=photo
 ```
 
 | Variável | Obrigatória | Descrição |

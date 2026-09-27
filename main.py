@@ -23,4 +23,10 @@ iniciar_scheduler(bot)  # avisos de vencimento (1 dia antes) + expiração/remo�
 
 if __name__ == "__main__":
     print("Bot está rodando...")
-    bot.infinity_polling(timeout=20, long_polling_timeout=20)
+    # allowed_updates precisa incluir "chat_member" explicitamente (Bot API 5.1+),
+    # senão o Telegram não entrega os eventos de entrada/saída de canal que o
+    # bot usa pra detectar quando um convite VIP foi consumido e destruí-lo.
+    bot.infinity_polling(
+        timeout=20, long_polling_timeout=20,
+        allowed_updates=telebot.util.update_types,
+    )

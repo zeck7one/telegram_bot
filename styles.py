@@ -48,3 +48,26 @@ def card(title: str, lines: dict, emoji: str = "📦") -> str:
     """Monta um bloco de texto formatado em HTML no estilo 'card'."""
     body = "\n".join(f"<b>{k}:</b> {v}" for k, v in lines.items())
     return f"{emoji} <b>{title}</b>\n\n{body}"
+
+
+TIER_EMOJI = {
+    "bronze": "🥉",
+    "prata": "🥈",
+    "ouro": "🥇",
+    "diamante": "💎",
+}
+
+
+def tier_emoji(tier_id: str) -> str:
+    return TIER_EMOJI.get((tier_id or "").lower(), "⭐")
+
+
+def banner_card(titulo: str, linhas: list, emoji: str = "💎", chamada: str = "") -> str:
+    """Card mais chamativo, pensado pra legenda de banner (foto/vídeo com
+    caption), com moldura e título centralizado — usado por texto_menu_vip()."""
+    borda = "✨━━━━━━━━━━━━━✨"
+    corpo = "\n".join(linhas)
+    texto = f"{borda}\n{emoji} <b>{titulo.upper()}</b> {emoji}\n{borda}\n\n{corpo}"
+    if chamada:
+        texto += f"\n\n{chamada}"
+    return texto

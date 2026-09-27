@@ -5,18 +5,26 @@ import time
 from telebot import types
 
 import config
-from config import LOFYPAY_API_KEY, ACCESS_LINK, ADMIN_CHAT_ID
+from config import (
+    LOFYPAY_API_KEY, ACCESS_LINK, ADMIN_CHAT_ID,
+    PREVIEW_CHANNEL_ID, PREVIEW_CHANNEL_LINK,
+    PREVIEW_BANNER, PREVIEW_MEDIA, PREVIEW_MEDIA_TYPE,
+    BANNER_SOURCE_CHANNEL_ID,
+)
 from lofypay import (
     gerar_pix, consultar_status_pix, simular_pagamento_pix,
     gerar_qrcode_imagem, gerar_link_acesso, poll_pagamento,
-    conceder_assinatura_se_necessario,
+    conceder_assinatura_se_necessario, LINK_JA_UTILIZADO,
 )
 from storage import (
     token_info, marcar_token_usado, registrar_transacao,
     buscar_transacao, buscar_ultima_transacao_pendente,
     atualizar_status_transacao, resumo_vendas,
+    transacao_por_invite_link, marcar_link_usado,
+    usuario_existe, registrar_usuario,
+    salvar_midia_previa, obter_midia_previa,
 )
-from styles import card, status_emoji, status_label
+from styles import card, status_emoji, status_label, tier_emoji, banner_card
 from vip import VIP_TIERS
 
 TEXTO_HELP_COMUM = '''
@@ -33,11 +41,111 @@ Comandos administrativos:
 /simularpix <idTransaction> [status] - Simula pagamento no sandbox (só sk_test_)
 /relatorio - Mostra total de vendas confirmadas
 /postarvip <canal_id> <texto> - Posta no canal com botões VIP (aceita foto/vídeo via reply)
+/pegarmidia - Reply numa foto/vídeo pra pegar o file_id certo (cola em preview_banner/preview_media no .env)
 '''
 
 
 def _is_admin(user_id) -> bool:
     return bool(ADMIN_CHAT_ID) and str(user_id) == str(ADMIN_CHAT_ID)
+
+
+def _esta_no_canal(bot, canal_id, user_id) -> bool:
+    """Retorna True somente quando o Telegram confirma que o usuário está no canal.
+
+    O bot precisa ser administrador do canal para que get_chat_member() seja
+    confiável. Em caso de erro, tratamos como NÃO membro para não liberar a prévia.
+    """
+    try:
+        membro = bot.get_chat_member(canal_id, user_id)
+        return membro.status in ("member", "administrator", "creator")
+    except Exception as e:
+        print(f"Erro ao checar membro do canal de prévias (user_id={user_id}): {e}")
+        return False
+
+
+def _arquivo_ou_id(valor):
+    """Mantém file_id/URL como string e transforma caminho local em arquivo aberto."""
+    if not valor:
+        return None, None
+    try:
+        import os
+        if os.path.isfile(valor):
+            return open(valor, "rb"), True
+    except Exception as e:
+        print(f"Erro ao abrir mídia de prévia '{valor}': {e}")
+    return valor, False
+
+
+def _enviar_menu_vip(bot, chat_id):
+    """Manda o menu de planos VIP tentando o banner primeiro — dinâmico do
+    canal, depois o fixo do .env — e só cai pro texto puro se as duas
+    tentativas de imagem falharem (ex: file_id inválido, URL que o Telegram
+    não reconhece como imagem direta). Reaproveitada por _enviar_previa (que
+    ainda soma o vídeo) e pelo deep link /start vip, que antes mandava sempre
+    texto puro sem nem tentar o banner."""
+    legenda = texto_menu_vip()
+    markup = teclado_vip_planos()
+
+    banner_dinamico = obter_midia_previa("banner")
+    if banner_dinamico:
+        try:
+            bot.send_photo(
+                chat_id, banner_dinamico["file_id"],
+                caption=legenda, parse_mode="HTML", reply_markup=markup,
+            )
+            return
+        except Exception as e:
+            print(f"Erro ao enviar banner dinâmico (chat_id={chat_id}): {e}")
+
+    if PREVIEW_BANNER:
+        banner, abriu = _arquivo_ou_id(PREVIEW_BANNER)
+        try:
+            bot.send_photo(chat_id, banner, caption=legenda, parse_mode="HTML", reply_markup=markup)
+            return
+        except Exception as e:
+            print(f"Erro ao enviar banner fixo (preview_banner, chat_id={chat_id}): {e}")
+        finally:
+            if abriu:
+                banner.close()
+
+    # Nenhuma imagem deu certo (ou nenhuma configurada) — garante que o
+    # usuário ao menos recebe os preços e os botões pra comprar.
+    bot.send_message(chat_id, legenda, parse_mode="HTML", reply_markup=markup)
+
+
+def _enviar_previa(bot, chat_id):
+    """Envia banner + preços + mídia de prévia para quem já está no canal.
+
+    O banner segue a cascata de _enviar_menu_vip (dinâmico → fixo → texto).
+    O vídeo abaixo segue a mesma ideia: dinâmico do canal → fixo do .env →
+    simplesmente não manda nada (não há "texto" equivalente pra vídeo)."""
+    _enviar_menu_vip(bot, chat_id)
+
+    video_enviado = False
+    video_dinamico = obter_midia_previa("video")
+    if video_dinamico:
+        try:
+            bot.send_video(
+                chat_id, video_dinamico["file_id"], supports_streaming=True,
+                caption="🎬 <b>Prévia exclusiva</b> — dá uma olhada no que te espera 👀",
+                parse_mode="HTML",
+            )
+            video_enviado = True
+        except Exception as e:
+            print(f"Erro ao enviar vídeo dinâmico (chat_id={chat_id}): {e}")
+
+    if not video_enviado and PREVIEW_MEDIA:
+        media, abriu = _arquivo_ou_id(PREVIEW_MEDIA)
+        try:
+            if PREVIEW_MEDIA_TYPE == "video":
+                bot.send_video(chat_id, media, supports_streaming=True)
+            else:
+                bot.send_photo(chat_id, media)
+        except Exception as e:
+            print(f"Erro ao enviar mídia fixa (preview_media, chat_id={chat_id}): {e}")
+        finally:
+            if abriu:
+                media.close()
 
 
 # === Teclados: PIX comum (/pix) ===
@@ -103,6 +211,11 @@ def teclado_vip_planos() -> types.InlineKeyboardMarkup:
             f"{tier['nome']} — R$ {tier['preco']:.2f}",
             callback_data=f"vip_tier:{tier_id}",
         ))
+    if PREVIEW_CHANNEL_LINK:
+        markup.add(types.InlineKeyboardButton(
+            "📢 Canal de prévias",
+            url=PREVIEW_CHANNEL_LINK,
+        ))
     return markup
 
 
@@ -121,17 +234,73 @@ def teclado_vip_pix(id_transaction: str, sandbox: bool, is_admin: bool = False) 
 
 
 def texto_menu_vip() -> str:
-    linhas = {tier["nome"]: f"R$ {tier['preco']:.2f}" for tier in VIP_TIERS.values()}
-    return card("Planos VIP", linhas, emoji="💎") + "\n\nEscolha um plano abaixo pra gerar o PIX:"
+    linhas = [
+        f"{tier_emoji(tier_id)} <b>{tier['nome']}</b> — R$ {tier['preco']:.2f} ({tier['dias']} dias)"
+        for tier_id, tier in VIP_TIERS.items()
+    ]
+    return banner_card(
+        "Planos VIP", linhas, emoji="💎",
+        chamada="👉 Escolha um plano abaixo pra gerar o PIX:",
+    )
 
 
 def registrar_handlers(bot):
     """Registra todos os comandos na instância do bot passada."""
 
+    @bot.channel_post_handler(
+        content_types=['photo', 'video'],
+        func=lambda post: bool(BANNER_SOURCE_CHANNEL_ID) and str(post.chat.id) == str(BANNER_SOURCE_CHANNEL_ID),
+    )
+    def capturar_midia_banner(post):
+        """Toda foto/vídeo postado no canal de mídia (banner_source_channel_id)
+        vira automaticamente o banner/vídeo de prévia atual, usado por
+        _enviar_previa. Zeck só precisa postar uma arte nova lá pra atualizar
+        o que o bot manda — sem tocar no .env nem reiniciar o bot."""
+        try:
+            if post.photo:
+                salvar_midia_previa("banner", post.photo[-1].file_id, post.chat.id, post.message_id)
+                print(f"📸 Novo banner de prévia capturado (canal {post.chat.id}, msg {post.message_id})")
+            elif post.video:
+                salvar_midia_previa("video", post.video.file_id, post.chat.id, post.message_id)
+                print(f"🎬 Novo vídeo de prévia capturado (canal {post.chat.id}, msg {post.message_id})")
+        except Exception as e:
+            print(f"Erro ao capturar mídia de prévia do canal {post.chat.id}: {e}")
+
     @bot.message_handler(commands=['start'])
     def start(messagem):
         try:
             args = messagem.text.split(maxsplit=1)
+
+            if len(args) == 1:
+                # /start puro SEMPRE verifica o canal de prévias.
+                # Não usamos usuario_existe() para pular esta etapa: um usuário
+                # já cadastrado também precisa estar no canal para receber a prévia.
+                if PREVIEW_CHANNEL_ID:
+                    if not usuario_existe(messagem.from_user.id):
+                        registrar_usuario(
+                            messagem.from_user.id,
+                            messagem.from_user.first_name or messagem.from_user.username,
+                            messagem.from_user.username,
+                        )
+
+                    if not _esta_no_canal(bot, PREVIEW_CHANNEL_ID, messagem.from_user.id):
+                        markup = types.InlineKeyboardMarkup()
+                        if PREVIEW_CHANNEL_LINK:
+                            markup.add(types.InlineKeyboardButton(
+                                "📢 Entrar no canal de prévias",
+                                url=PREVIEW_CHANNEL_LINK,
+                            ))
+                        bot.send_message(
+                            messagem.chat.id,
+                            "👋 Para continuar, entre primeiro no nosso canal de prévias."
+                            "\n\nDepois de entrar, volte aqui e mande /start novamente.",
+                            reply_markup=markup if PREVIEW_CHANNEL_LINK else None,
+                        )
+                        return
+
+                    # Confirmado pelo Telegram: agora sim libera banner + preços + preview.
+                    _enviar_previa(bot, messagem.chat.id)
+                    return
 
             if len(args) == 2 and args[1].startswith("acesso_"):
                 id_transaction = args[1][len("acesso_"):]
@@ -152,10 +321,7 @@ def registrar_handlers(bot):
                 return
 
             if len(args) == 2 and args[1] == "vip":
-                bot.send_message(
-                    messagem.chat.id, texto_menu_vip(),
-                    parse_mode="HTML", reply_markup=teclado_vip_planos(),
-                )
+                _enviar_menu_vip(bot, messagem.chat.id)
                 return
 
             if len(args) == 2 and args[1].startswith("vip_"):
@@ -213,17 +379,22 @@ def registrar_handlers(bot):
             atualizar_status_transacao(id_transaction, status)
 
             if status == "PAID_OUT":
-                conceder_assinatura_se_necessario(bot, id_transaction, chat_id)
+                concedeu_agora = conceder_assinatura_se_necessario(bot, id_transaction, chat_id)
                 plano = transacao.get("produto_id")
                 canal_id = VIP_TIERS.get(plano, {}).get("canal_id") if plano else None
-                link = gerar_link_acesso(bot, id_transaction, canal_id=canal_id)
+                link = gerar_link_acesso(bot, id_transaction, canal_id=canal_id, permitir_criar=concedeu_agora)
 
                 texto = card(
                     "Pagamento confirmado",
                     {"ID": f"<code>{id_transaction}</code>"},
                     emoji="✅",
                 )
-                if link:
+                if link == LINK_JA_UTILIZADO:
+                    # A transação já é válida (PAID_OUT), mas o convite de acesso
+                    # dela já foi consumido antes — nunca gera um segundo convite
+                    # pra mesma compra, então não repassa nenhum link aqui.
+                    texto += "\n\n⚠️ O acesso dessa compra já foi utilizado e não pode ser gerado novamente."
+                elif link:
                     texto += f"\n\n🔓 Aqui está seu acesso:\n{link}"
                 bot.send_message(chat_id, texto, parse_mode="HTML")
 
@@ -414,6 +585,40 @@ def registrar_handlers(bot):
             print(f"Erro no /postarvip (chat_id={messagem.chat.id}): {e}")
             bot.send_message(messagem.chat.id, "❌ Não foi possível completar o comando agora. Tente novamente em instantes.")
 
+    @bot.message_handler(commands=['pegarmidia'])
+    def pegarmidia(messagem):
+        """Devolve o file_id de uma foto/vídeo — a forma confiável de preencher
+        preview_banner/preview_media no .env, já que um file_id nunca dá o erro
+        'wrong type of the web page content' que uma URL indireta pode dar."""
+        if not _is_admin(messagem.from_user.id):
+            bot.send_message(messagem.chat.id, "❌ Comando restrito.")
+            return
+        origem = messagem.reply_to_message
+        if not origem or not (origem.photo or origem.video):
+            bot.send_message(
+                messagem.chat.id,
+                "Manda uma foto ou vídeo aqui pro bot (nesse chat mesmo) e depois dê "
+                "Reply nela com /pegarmidia."
+            )
+            return
+        if origem.photo:
+            file_id = origem.photo[-1].file_id
+            bot.send_message(
+                messagem.chat.id,
+                f"📸 file_id da foto:\n<code>{file_id}</code>\n\n"
+                "Cola em <code>preview_banner=</code> no .env e reinicia o bot.",
+                parse_mode="HTML",
+            )
+        else:
+            file_id = origem.video.file_id
+            bot.send_message(
+                messagem.chat.id,
+                f"🎬 file_id do vídeo:\n<code>{file_id}</code>\n\n"
+                "Cola em <code>preview_media=</code> e deixa <code>preview_media_type=video</code> "
+                "no .env, depois reinicia o bot.",
+                parse_mode="HTML",
+            )
+
     # === Botões (callbacks) — PIX comum ===
 
     @bot.callback_query_handler(func=lambda call: call.data.startswith("check:"))
@@ -561,20 +766,60 @@ def registrar_handlers(bot):
 
         # Concede os dias do plano (idempotente: se o polling em background já
         # confirmou esse mesmo pagamento antes, essa chamada não soma dias de novo).
-        conceder_assinatura_se_necessario(bot, id_transaction, call.message.chat.id)
+        concedeu_agora = conceder_assinatura_se_necessario(bot, id_transaction, call.message.chat.id)
 
         transacao = buscar_transacao(id_transaction)
         tier_id = transacao.get("produto_id") if transacao else None
         tier = VIP_TIERS.get(tier_id) if tier_id else None
         canal_id = tier.get("canal_id") if tier else None
 
-        link = gerar_link_acesso(bot, id_transaction, canal_id=canal_id)
+        link = gerar_link_acesso(bot, id_transaction, canal_id=canal_id, permitir_criar=concedeu_agora)
+        if link == LINK_JA_UTILIZADO:
+            bot.answer_callback_query(
+                call.id,
+                "⚠️ O acesso dessa compra já foi utilizado e não pode ser gerado novamente.",
+                show_alert=True,
+            )
+            return
         if not link:
             bot.answer_callback_query(call.id, "⚠️ Nenhum canal configurado pra esse plano.", show_alert=True)
             return
 
         bot.send_message(call.message.chat.id, f"🔓 Aqui está seu acesso VIP:\n{link}")
         bot.answer_callback_query(call.id, "Acesso liberado ✅")
+
+    @bot.chat_member_handler()
+    def on_chat_member_update(update: types.ChatMemberUpdated):
+        """Detecta quando alguém entra num canal usando um dos convites de
+        acesso VIP que o bot gerou, e destrói o convite na hora: revoga ele
+        explicitamente (reforço — o member_limit=1 já devia invalidar sozinho)
+        e marca no banco que essa transação já consumiu seu acesso, pra
+        gerar_link_acesso nunca mais devolver um link novo pra ela."""
+        try:
+            invite = update.invite_link
+            if not invite or not invite.invite_link:
+                return  # entrada sem passar por um convite (ex: já era membro, foi adicionado direto)
+
+            entrou_status = {"member", "restricted"}
+            saiu_status = {"left", "kicked"}
+            entrou_agora = (
+                update.new_chat_member.status in entrou_status
+                and update.old_chat_member.status in saiu_status
+            )
+            if not entrou_agora:
+                return
+
+            id_transaction = transacao_por_invite_link(invite.invite_link)
+            if not id_transaction:
+                return  # convite de outra origem, não gerado por gerar_link_acesso
+
+            if marcar_link_usado(id_transaction):
+                try:
+                    bot.revoke_chat_invite_link(update.chat.id, invite.invite_link)
+                except Exception:
+                    pass  # member_limit=1 já deve ter revogado sozinho; ignora erro aqui
+        except Exception as e:
+            print(f"Erro ao processar entrada via convite VIP: {e}")
 
     @bot.message_handler(func=lambda m: True)
     def fallback(messagem):

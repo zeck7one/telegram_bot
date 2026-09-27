@@ -47,6 +47,9 @@ def init_db():
             ("produto_id", "TEXT"),
             ("dias", "INTEGER"),
             ("processado", "INTEGER NOT NULL DEFAULT 0"),
+            ("invite_link", "TEXT"),
+            ("invite_link_canal_id", "INTEGER"),
+            ("invite_link_usado", "INTEGER NOT NULL DEFAULT 0"),
         ):
             try:
                 conn.execute(f"ALTER TABLE transacoes ADD COLUMN {coluna} {definicao}")
@@ -74,6 +77,16 @@ def init_db():
             )
         """)
         conn.execute("CREATE INDEX IF NOT EXISTS idx_assinaturas_usuario ON assinaturas(usuario_id)")
+
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS midia_previa (
+                tipo TEXT PRIMARY KEY,
+                file_id TEXT NOT NULL,
+                canal_id INTEGER,
+                message_id INTEGER,
+                atualizado_em TEXT NOT NULL
+            )
+        """)
 
 
 # ---------- tokens de acesso único (fallback via deep link, quando não há canal) ----------
@@ -164,6 +177,66 @@ def conceder_pagamento_uma_vez(id_transaction):
     return cur.rowcount == 1
 
 
+def obter_estado_link(id_transaction):
+    """Retorna {'invite_link', 'canal_id', 'usado'} se essa transação já tem um
+    convite gerado, ou None se ainda não foi gerado nenhum. Usado pra nunca
+    emitir mais de um convite pra mesma transação — /verificar_pagamento e
+    'Liberar acesso VIP' chamados várias vezes devolvem sempre o mesmo link
+    até ele ser consumido."""
+    with _conn() as conn:
+        row = conn.execute(
+            "SELECT invite_link, invite_link_canal_id, invite_link_usado "
+            "FROM transacoes WHERE id_transaction = ?",
+            (id_transaction,)
+        ).fetchone()
+    if not row or row["invite_link"] is None:
+        return None
+    return {
+        "invite_link": row["invite_link"],
+        "canal_id": row["invite_link_canal_id"],
+        "usado": bool(row["invite_link_usado"]),
+    }
+
+
+def salvar_link_convite_se_necessario(id_transaction, canal_id, invite_link):
+    """Grava o convite gerado pra essa transação, só se ela ainda não tinha
+    nenhum salvo — atômico, evita duas threads (polling + clique manual)
+    gravando dois convites diferentes pra mesma transação. Retorna True pra
+    quem ganhou a corrida; False significa que já existe um convite salvo
+    (o convite recém-criado pelo chamador deve ser revogado e descartado)."""
+    with _conn() as conn:
+        cur = conn.execute(
+            "UPDATE transacoes SET invite_link = ?, invite_link_canal_id = ? "
+            "WHERE id_transaction = ? AND invite_link IS NULL",
+            (invite_link, canal_id, id_transaction)
+        )
+    return cur.rowcount == 1
+
+
+def transacao_por_invite_link(invite_link):
+    """Acha o id_transaction dono de um convite específico — usado quando o
+    bot detecta alguém entrando no canal pra saber qual link marcar como usado."""
+    with _conn() as conn:
+        row = conn.execute(
+            "SELECT id_transaction FROM transacoes WHERE invite_link = ?",
+            (invite_link,)
+        ).fetchone()
+    return row["id_transaction"] if row else None
+
+
+def marcar_link_usado(id_transaction):
+    """Marca o convite dessa transação como consumido — atômico, só na 1ª vez
+    (evita reprocessar se o evento de entrada chegar duplicado). Retorna True
+    só pra quem conseguiu marcar primeiro."""
+    with _conn() as conn:
+        cur = conn.execute(
+            "UPDATE transacoes SET invite_link_usado = 1 "
+            "WHERE id_transaction = ? AND invite_link_usado = 0",
+            (id_transaction,)
+        )
+    return cur.rowcount == 1
+
+
 def resumo_vendas():
     """Total confirmado e contagem de vendas pagas — usado pelo /relatorio."""
     with _conn() as conn:
@@ -185,6 +258,16 @@ def registrar_usuario(telegram_id, nome=None, username=None):
             "nome = excluded.nome, username = excluded.username, atualizado_em = excluded.atualizado_em",
             (telegram_id, nome, username, datetime.utcnow().isoformat())
         )
+
+
+def usuario_existe(telegram_id):
+    """True se esse telegram_id já apareceu antes em 'usuarios' — usado pra saber
+    se um /start é a 1ª interação do usuário com o bot."""
+    with _conn() as conn:
+        row = conn.execute(
+            "SELECT 1 FROM usuarios WHERE telegram_id = ?", (telegram_id,)
+        ).fetchone()
+    return row is not None
 
 
 # ---------- assinaturas VIP (planos com validade) ----------
@@ -265,6 +348,34 @@ def assinaturas_expiradas():
             (agora,)
         ).fetchall()
     return [dict(r) for r in rows]
+
+
+# ---------- banner/vídeo de prévia capturados automaticamente de um canal ----------
+
+def salvar_midia_previa(tipo, file_id, canal_id=None, message_id=None):
+    """Guarda o file_id mais recente de banner/vídeo vindo do canal de mídia
+    (tipo = 'banner' ou 'video'). Upsert: cada postagem nova substitui a anterior
+    daquele tipo, então a prévia enviada aos usuários sempre reflete a última arte."""
+    with _conn() as conn:
+        conn.execute(
+            "INSERT INTO midia_previa (tipo, file_id, canal_id, message_id, atualizado_em) "
+            "VALUES (?, ?, ?, ?, ?) "
+            "ON CONFLICT(tipo) DO UPDATE SET "
+            "file_id = excluded.file_id, canal_id = excluded.canal_id, "
+            "message_id = excluded.message_id, atualizado_em = excluded.atualizado_em",
+            (tipo, file_id, canal_id, message_id, datetime.utcnow().isoformat())
+        )
+
+
+def obter_midia_previa(tipo):
+    """Retorna {'file_id', 'canal_id', 'message_id', 'atualizado_em'} pra esse
+    tipo ('banner' ou 'video'), ou None se nada foi capturado ainda."""
+    with _conn() as conn:
+        row = conn.execute(
+            "SELECT file_id, canal_id, message_id, atualizado_em FROM midia_previa WHERE tipo = ?",
+            (tipo,)
+        ).fetchone()
+    return dict(row) if row else None
 
 
 def expirar_assinatura(assinatura_id):
