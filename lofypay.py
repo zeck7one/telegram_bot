@@ -38,8 +38,15 @@ def gerar_pix(amount, name=None, document=None, email=None, external_reference=N
     if external_reference:
         payload["external_reference"] = external_reference
 
-    resp = requests.post(f"{LOFYPAY_BASE_URL}/gateway", headers=HEADERS, json=payload, timeout=15)
-    return resp.json()
+    try:
+        resp = requests.post(f"{LOFYPAY_BASE_URL}/gateway", headers=HEADERS, json=payload, timeout=15)
+        dados = resp.json()
+    except (requests.RequestException, ValueError) as e:
+        # Rede caiu, timeout ou resposta que não é JSON — devolve um erro padrão
+        # pros chamadores mostrarem a mensagem amigável em vez de estourar exceção.
+        print(f"Erro ao chamar a LofyPay (gerar_pix): {e}")
+        return {"status": "error"}
+    return dados if isinstance(dados, dict) else {"status": "error"}
 
 
 def consultar_status_pix(id_transaction):
@@ -242,5 +249,9 @@ def poll_pagamento(bot, chat_id, id_transaction, timeout_seg=600, intervalo=10, 
         },
         emoji="⏱",
     )
-    texto += f"\n\nUse /verificar_pagamento {id_transaction} pra checar manualmente — o PIX ainda pode ser pago depois disso."
+    texto += (
+        "\n\n💳 Já pagou? Clique em <b>Verificar pagamento</b> na mensagem do PIX "
+        f"(ou use /verificar_pagamento {id_transaction}) que eu libero seu acesso — "
+        "o PIX ainda pode ser pago depois disso."
+    )
     bot.send_message(chat_id, texto, parse_mode="HTML")

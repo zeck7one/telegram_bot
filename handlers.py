@@ -1,4 +1,5 @@
 import base64
+import html
 import threading
 import time
 
@@ -9,7 +10,7 @@ from config import (
     LOFYPAY_API_KEY, ACCESS_LINK, ADMIN_CHAT_ID,
     PREVIEW_CHANNEL_ID, PREVIEW_CHANNEL_LINK,
     PREVIEW_BANNER, PREVIEW_MEDIA, PREVIEW_MEDIA_TYPE,
-    BANNER_SOURCE_CHANNEL_ID,
+    BANNER_SOURCE_CHANNEL_ID, POST_CHANNEL_ID,
 )
 from lofypay import (
     gerar_pix, consultar_status_pix, simular_pagamento_pix,
@@ -19,7 +20,8 @@ from lofypay import (
 from storage import (
     token_info, marcar_token_usado, registrar_transacao,
     buscar_transacao, buscar_ultima_transacao_pendente,
-    atualizar_status_transacao, resumo_vendas,
+    atualizar_status_transacao, resumo_vendas, transacoes_nao_pagas,
+    buscar_pix_pendente_recente,
     transacao_por_invite_link, marcar_link_usado,
     usuario_existe, registrar_usuario,
     salvar_midia_previa, obter_midia_previa,
@@ -39,8 +41,8 @@ Comandos administrativos:
 /pix <valor> [nome] - Gera uma cobrança PIX avulsa
 /statuspix <idTransaction> - Consulta o status de qualquer cobrança
 /simularpix <idTransaction> [status] - Simula pagamento no sandbox (só sk_test_)
-/relatorio - Mostra total de vendas confirmadas
-/postarvip <canal_id> <texto> - Posta no canal com botões VIP (aceita foto/vídeo via reply)
+/relatorio - Vendas confirmadas + PIX gerados e não pagos (nome/@/ID de quem gerou)
+/postar [legenda] - Posta no canal do post_channel_id (.env) com os planos VIP e botões; pra foto/vídeo, dê reply nela com /postar (também aceita /pastar e /postarvip)
 /pegarmidia - Reply numa foto/vídeo pra pegar o file_id certo (cola em preview_banner/preview_media no .env)
 '''
 
@@ -175,16 +177,38 @@ def teclado_relatorio() -> types.InlineKeyboardMarkup:
     return markup
 
 
+def _quem_gerou(t: dict) -> str:
+    """Melhor identificação disponível: nome > @username > chat_id."""
+    nome = t.get("nome_usuario") or t.get("nome_cobranca")
+    user = f"@{t['username']}" if t.get("username") else None
+    partes = [html.escape(str(p)) for p in (nome, user) if p]
+    return " ".join(partes) if partes else f"ID {t['chat_id']}"
+
+
 def texto_relatorio() -> str:
     resumo = resumo_vendas()
-    return card(
+    total_np, nao_pagas = transacoes_nao_pagas(limite=15)
+    texto = card(
         "Relatório de vendas",
         {
             "Vendas confirmadas": resumo["quantidade"],
             "Total arrecadado": f"R$ {resumo['total']:.2f}",
+            "PIX gerados e não pagos": total_np,
         },
         emoji="📊",
     )
+    if nao_pagas:
+        linhas = []
+        for t in nao_pagas:
+            plano = f" · {html.escape(t['produto_id'])}" if t.get("produto_id") else ""
+            linhas.append(
+                f"{status_emoji(t['status'])} {_quem_gerou(t)} — R$ {t['valor']:.2f}{plano} "
+                f"(<code>{t['chat_id']}</code>)"
+            )
+        texto += "\n\n<b>Não pagos (mais recentes):</b>\n" + "\n".join(linhas)
+        if total_np > len(nao_pagas):
+            texto += f"\n… e mais {total_np - len(nao_pagas)}"
+    return texto
 
 
 # === Teclados: funil VIP ===
@@ -545,44 +569,56 @@ def registrar_handlers(bot):
             reply_markup=teclado_relatorio(),
         )
 
-    @bot.message_handler(commands=['postarvip'])
-    def postarvip(messagem):
+    @bot.message_handler(commands=['postar', 'pastar', 'postarvip'])
+    def postar(messagem):
         if not _is_admin(messagem.from_user.id):
             bot.send_message(messagem.chat.id, "❌ Comando restrito.")
             return
         try:
-            args = messagem.text.split(maxsplit=2)
-            if len(args) < 2:
+            if not POST_CHANNEL_ID:
                 bot.send_message(
                     messagem.chat.id,
-                    "Formato:\n"
-                    "• Só texto: /postarvip <chat_id_do_canal> <texto>\n"
-                    "• Com foto/vídeo: mande a foto ou vídeo pro bot, depois dê Reply "
-                    "nela com /postarvip <chat_id_do_canal> [legenda opcional]"
+                    "⚠️ Canal de postagem não configurado. Coloque no .env:\n"
+                    "post_channel_id=-100xxxxxxxxxx"
                 )
                 return
 
-            canal_id = int(args[1])
-            legenda = args[2] if len(args) == 3 else None
+            canal_id = int(POST_CHANNEL_ID)
+            args = messagem.text.split(maxsplit=1)
+            legenda_extra = args[1].strip() if len(args) == 2 else ""
             origem = messagem.reply_to_message
 
+            # Legenda final = legenda opcional do admin (escapada pra não quebrar
+            # o HTML) + bloco de planos VIP (mesmo texto do menu do privado).
+            partes = []
+            if legenda_extra:
+                partes.append(html.escape(legenda_extra))
+            partes.append(texto_menu_vip())
+            legenda = "\n\n".join(partes)
+            markup = teclado_post_vip()
+
+            midia = None
             if origem and origem.photo:
-                file_id = origem.photo[-1].file_id
-                bot.send_photo(canal_id, file_id, caption=legenda, reply_markup=teclado_post_vip())
+                midia = (bot.send_photo, origem.photo[-1].file_id)
             elif origem and origem.video:
-                file_id = origem.video.file_id
-                bot.send_video(canal_id, file_id, caption=legenda, reply_markup=teclado_post_vip())
+                midia = (bot.send_video, origem.video.file_id)
+
+            if midia:
+                enviar, file_id = midia
+                if len(legenda) <= 1024:  # limite de caption do Telegram
+                    enviar(canal_id, file_id, caption=legenda, parse_mode="HTML", reply_markup=markup)
+                else:
+                    # Legenda longa demais: mídia sozinha + texto completo com botões.
+                    enviar(canal_id, file_id)
+                    bot.send_message(canal_id, legenda, parse_mode="HTML", reply_markup=markup)
             else:
-                if not legenda:
-                    bot.send_message(messagem.chat.id, "Sem foto/vídeo (reply) e sem texto — nada pra postar.")
-                    return
-                bot.send_message(canal_id, legenda, reply_markup=teclado_post_vip())
+                bot.send_message(canal_id, legenda, parse_mode="HTML", reply_markup=markup)
 
             bot.send_message(messagem.chat.id, "✅ Postado no canal com os botões VIP.")
         except ValueError:
-            bot.send_message(messagem.chat.id, "chat_id inválido — precisa ser o ID numérico do canal (ex: -1001234567890).")
+            bot.send_message(messagem.chat.id, "post_channel_id inválido no .env — precisa ser o ID numérico do canal (ex: -1001234567890).")
         except Exception as e:
-            print(f"Erro no /postarvip (chat_id={messagem.chat.id}): {e}")
+            print(f"Erro no /postar (chat_id={messagem.chat.id}): {e}")
             bot.send_message(messagem.chat.id, "❌ Não foi possível completar o comando agora. Tente novamente em instantes.")
 
     @bot.message_handler(commands=['pegarmidia'])
@@ -674,17 +710,55 @@ def registrar_handlers(bot):
             pass
         bot.answer_callback_query(call.id, "Relatório atualizado ✅")
 
+    def _enviar_pix_vip(chat_id, tier, id_transaction, codigo, qr_base64, sandbox, is_admin, reaproveitado=False):
+        """Manda o card do PIX VIP + QR code (usado tanto no PIX novo quanto ao reenviar um pendente)."""
+        texto = card(
+            f"PIX gerado — {tier['nome']}",
+            {
+                "Valor": f"R$ {tier['preco']:.2f}",
+                "Status": f"{status_emoji('pending')} {status_label('pending')}",
+                "ID": f"<code>{id_transaction}</code>",
+            },
+            emoji="💠",
+        )
+        if reaproveitado:
+            texto += "\n\n♻️ Você já tinha esse PIX em aberto — é o mesmo código, não precisa gerar outro."
+        texto += f"\n\n📋 Código copia-e-cola:\n<code>{codigo}</code>"
+        texto += (
+            "\n\n⏳ Pagou e a confirmação demorou? Clique em <b>💳 Verificar pagamento</b> "
+            "aqui embaixo que eu confirmo e libero seu acesso."
+        )
+
+        bot.send_message(chat_id, texto, parse_mode="HTML", reply_markup=teclado_vip_pix(id_transaction, sandbox, is_admin=is_admin))
+
+        if qr_base64:
+            bot.send_photo(chat_id, base64.b64decode(qr_base64), caption="📱 Ou escaneie o QR Code")
+        else:
+            bot.send_photo(chat_id, gerar_qrcode_imagem(codigo), caption="📱 Ou escaneie o QR Code")
+
     def iniciar_compra_vip(chat_id, tier_id):
         """Gera o PIX de um plano VIP e manda o card + QR code pro chat_id.
         Usado tanto pelo botão direto do post no canal (/start vip_<tier_id>)
         quanto pelo menu de planos no privado (callback vip_tier:<tier_id>).
-        Retorna (ok: bool, mensagem_erro: str | None)."""
+        Se o usuário já tem um PIX pendente recente desse plano, reenvia o mesmo
+        em vez de criar outro (anti-spam). Retorna (ok: bool, mensagem_erro: str | None)."""
         tier = VIP_TIERS.get(tier_id)
 
         if not tier:
             return False, "❌ Plano inválido."
         if not tier.get("canal_id"):
             return False, f"⚠️ O plano {tier['nome']} ainda não tem canal_id configurado em vip.py."
+
+        sandbox = LOFYPAY_API_KEY.startswith("sk_test_")
+        is_admin = _is_admin(chat_id)  # em chat privado, chat_id == telegram_id de quem está comprando
+
+        existente = buscar_pix_pendente_recente(chat_id, tier_id)
+        if existente:
+            _enviar_pix_vip(
+                chat_id, tier, existente["id_transaction"], existente["codigo_pix"],
+                existente.get("qr_base64"), sandbox, is_admin, reaproveitado=True,
+            )
+            return True, None
 
         resultado = gerar_pix(
             amount=tier["preco"],
@@ -698,28 +772,12 @@ def registrar_handlers(bot):
         id_transaction = resultado["idTransaction"]
         codigo = resultado["paymentCode"]
         qr_base64 = resultado.get("paymentCodeBase64")
-        sandbox = LOFYPAY_API_KEY.startswith("sk_test_")
 
-        registrar_transacao(id_transaction, chat_id, tier["preco"], produto_id=tier_id, dias=tier.get("dias"))
-        is_admin = _is_admin(chat_id)  # em chat privado, chat_id == telegram_id de quem está comprando
-
-        texto = card(
-            f"PIX gerado — {tier['nome']}",
-            {
-                "Valor": f"R$ {tier['preco']:.2f}",
-                "Status": f"{status_emoji('pending')} {status_label('pending')}",
-                "ID": f"<code>{id_transaction}</code>",
-            },
-            emoji="💠",
+        registrar_transacao(
+            id_transaction, chat_id, tier["preco"], produto_id=tier_id, dias=tier.get("dias"),
+            codigo_pix=codigo, qr_base64=qr_base64,
         )
-        texto += f"\n\n📋 Código copia-e-cola:\n<code>{codigo}</code>"
-
-        bot.send_message(chat_id, texto, parse_mode="HTML", reply_markup=teclado_vip_pix(id_transaction, sandbox, is_admin=is_admin))
-
-        if qr_base64:
-            bot.send_photo(chat_id, base64.b64decode(qr_base64), caption="📱 Ou escaneie o QR Code")
-        else:
-            bot.send_photo(chat_id, gerar_qrcode_imagem(codigo), caption="📱 Ou escaneie o QR Code")
+        _enviar_pix_vip(chat_id, tier, id_transaction, codigo, qr_base64, sandbox, is_admin)
 
         threading.Thread(
             target=poll_pagamento,
@@ -744,6 +802,10 @@ def registrar_handlers(bot):
         status = resultado.get("status", resultado.get("error", "desconhecido"))
         if status:
             atualizar_status_transacao(id_transaction, status)
+        if status == "PAID_OUT":
+            # Já pago: em vez de só mostrar o status, entrega o acesso (mesma lógica
+            # do "Liberar acesso VIP", idempotente — nunca gera 2º convite).
+            return cb_vip_release(call)
         bot.answer_callback_query(call.id, f"{status_emoji(status)} {status_label(status)}", show_alert=True)
 
     @bot.callback_query_handler(func=lambda call: call.data.startswith("vip_release:"))

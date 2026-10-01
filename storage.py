@@ -50,6 +50,8 @@ def init_db():
             ("invite_link", "TEXT"),
             ("invite_link_canal_id", "INTEGER"),
             ("invite_link_usado", "INTEGER NOT NULL DEFAULT 0"),
+            ("codigo_pix", "TEXT"),   # copia-e-cola, pra reaproveitar PIX pendente
+            ("qr_base64", "TEXT"),
         ):
             try:
                 conn.execute(f"ALTER TABLE transacoes ADD COLUMN {coluna} {definicao}")
@@ -120,14 +122,33 @@ def marcar_token_usado(id_transaction):
 
 # ---------- histórico de transações / pagamentos ----------
 
-def registrar_transacao(id_transaction, chat_id, valor, nome=None, produto_id=None, dias=None):
+def registrar_transacao(id_transaction, chat_id, valor, nome=None, produto_id=None, dias=None,
+                        codigo_pix=None, qr_base64=None):
     with _conn() as conn:
         conn.execute(
             "INSERT OR IGNORE INTO transacoes "
-            "(id_transaction, chat_id, nome, valor, produto_id, dias, status, criado_em) "
-            "VALUES (?, ?, ?, ?, ?, ?, 'PENDING', ?)",
-            (id_transaction, chat_id, nome, valor, produto_id, dias, datetime.utcnow().isoformat())
+            "(id_transaction, chat_id, nome, valor, produto_id, dias, status, criado_em, codigo_pix, qr_base64) "
+            "VALUES (?, ?, ?, ?, ?, ?, 'PENDING', ?, ?, ?)",
+            (id_transaction, chat_id, nome, valor, produto_id, dias,
+             datetime.utcnow().isoformat(), codigo_pix, qr_base64)
         )
+
+
+def buscar_pix_pendente_recente(chat_id, produto_id, max_idade_seg=480):
+    """PIX ainda pendente desse usuário pra esse plano, criado há no máximo
+    `max_idade_seg` (padrão 8 min — o polling de fundo dura 10). Usado pra
+    reenviar o mesmo PIX em vez de gerar um novo a cada clique."""
+    with _conn() as conn:
+        row = conn.execute(
+            "SELECT * FROM transacoes WHERE chat_id = ? AND produto_id = ? "
+            "AND status = 'PENDING' AND codigo_pix IS NOT NULL "
+            "ORDER BY criado_em DESC LIMIT 1",
+            (chat_id, produto_id)
+        ).fetchone()
+    if not row:
+        return None
+    idade = (datetime.utcnow() - datetime.fromisoformat(row["criado_em"])).total_seconds()
+    return dict(row) if idade <= max_idade_seg else None
 
 
 def buscar_transacao(id_transaction):
@@ -245,6 +266,23 @@ def resumo_vendas():
             "FROM transacoes WHERE status = 'PAID_OUT'"
         ).fetchone()
     return {"quantidade": row["qtd"], "total": row["total"]}
+
+
+def transacoes_nao_pagas(limite=15):
+    """PIX gerados que não foram pagos (status diferente de PAID_OUT/REFUNDED),
+    mais recentes primeiro, com nome/@username de quem gerou. Retorna
+    (total, lista) — a lista é cortada em `limite` itens."""
+    filtro = "t.status NOT IN ('PAID_OUT', 'REFUNDED')"
+    with _conn() as conn:
+        total = conn.execute(f"SELECT COUNT(*) FROM transacoes t WHERE {filtro}").fetchone()[0]
+        rows = conn.execute(
+            "SELECT t.id_transaction, t.chat_id, t.valor, t.status, t.produto_id, t.criado_em, "
+            "t.nome AS nome_cobranca, u.nome AS nome_usuario, u.username "
+            "FROM transacoes t LEFT JOIN usuarios u ON u.telegram_id = t.chat_id "
+            f"WHERE {filtro} ORDER BY t.criado_em DESC LIMIT ?",
+            (limite,)
+        ).fetchall()
+    return total, [dict(r) for r in rows]
 
 
 # ---------- usuários ----------

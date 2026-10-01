@@ -35,7 +35,11 @@ PREVIEW_MEDIA_TYPE = os.getenv('preview_media_type', 'photo').lower()
 # a arte basta postar uma nova lá, sem mexer no .env nem reiniciar o bot.
 BANNER_SOURCE_CHANNEL_ID = os.getenv('banner_source_channel_id')
 
-# Seu user_id do Telegram — se configurado, só você consegue rodar /postarvip.
+# Canal onde o /postar publica (chat_id numérico, tipo -100xxxxxxxxxx). Se vazio,
+# cai no preview_channel_id. Assim não precisa passar o ID do canal em todo comando.
+POST_CHANNEL_ID = os.getenv('post_channel_id') or os.getenv('preview_channel_id')
+
+# Seu user_id do Telegram — se configurado, só você consegue rodar /postar.
 # Pegue seu ID com @userinfobot. Deixe vazio pra não restringir (não recomendado).
 ADMIN_CHAT_ID = os.getenv('admin_chat_id')
 

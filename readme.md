@@ -107,7 +107,8 @@ python main.py
 | `/pix <valor> [nome]` | Gera cobrança PIX com QR code |
 | `/statuspix <idTransaction>` | Consulta status manualmente |
 | `/simularpix <idTransaction> [status]` | Simula pagamento no sandbox (só `sk_test_`) |
-| `/relatorio` | Total de vendas confirmadas |
+| `/relatorio` | Vendas confirmadas + PIX gerados e não pagos (nome/@/ID de quem gerou) |
+| `/postar [legenda]` | Posta no canal do `post_channel_id` com a tabela de planos VIP e botões (foto/vídeo via reply) |
 
 ## Banco de dados
 
