@@ -285,6 +285,18 @@ def transacoes_nao_pagas(limite=15):
     return total, [dict(r) for r in rows]
 
 
+def listar_transacoes():
+    """Todas as transações (mais recentes primeiro), com nome/@username de quem gerou."""
+    with _conn() as conn:
+        rows = conn.execute(
+            "SELECT t.id_transaction, t.chat_id, t.valor, t.status, t.produto_id, t.criado_em, "
+            "t.nome AS nome_cobranca, u.nome AS nome_usuario, u.username "
+            "FROM transacoes t LEFT JOIN usuarios u ON u.telegram_id = t.chat_id "
+            "ORDER BY t.criado_em DESC"
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
 # ---------- usuários ----------
 
 def registrar_usuario(telegram_id, nome=None, username=None):

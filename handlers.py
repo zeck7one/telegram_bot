@@ -1,5 +1,6 @@
 import base64
 import html
+from datetime import datetime
 import threading
 import time
 
@@ -21,7 +22,7 @@ from storage import (
     token_info, marcar_token_usado, registrar_transacao,
     buscar_transacao, buscar_ultima_transacao_pendente,
     atualizar_status_transacao, resumo_vendas, transacoes_nao_pagas,
-    buscar_pix_pendente_recente,
+    buscar_pix_pendente_recente, listar_transacoes,
     transacao_por_invite_link, marcar_link_usado,
     usuario_existe, registrar_usuario,
     salvar_midia_previa, obter_midia_previa,
@@ -171,9 +172,21 @@ def teclado_status(id_transaction: str) -> types.InlineKeyboardMarkup:
     return markup
 
 
-def teclado_relatorio() -> types.InlineKeyboardMarkup:
+RELATORIO_POR_PAGINA = 25      # 25 linhas cabem folgado nos 4096 caracteres do Telegram
+PENDENTE_MAX_MIN = 15          # PENDING mais velho que isso = polling morreu (ex: bot reiniciou)
+
+
+def teclado_relatorio(pagina: int = 0, total_paginas: int = 1) -> types.InlineKeyboardMarkup:
     markup = types.InlineKeyboardMarkup()
-    markup.add(types.InlineKeyboardButton("🔄 Atualizar relatório", callback_data="refresh_relatorio"))
+    if total_paginas > 1:
+        nav = []
+        if pagina > 0:
+            nav.append(types.InlineKeyboardButton("⬅️ Anterior", callback_data=f"relatorio_pag:{pagina - 1}"))
+        nav.append(types.InlineKeyboardButton(f"{pagina + 1}/{total_paginas}", callback_data=f"relatorio_pag:{pagina}"))
+        if pagina < total_paginas - 1:
+            nav.append(types.InlineKeyboardButton("Próxima ➡️", callback_data=f"relatorio_pag:{pagina + 1}"))
+        markup.row(*nav)
+    markup.add(types.InlineKeyboardButton("🔄 Atualizar relatório", callback_data=f"relatorio_pag:{pagina}"))
     return markup
 
 
@@ -185,30 +198,60 @@ def _quem_gerou(t: dict) -> str:
     return " ".join(partes) if partes else f"ID {t['chat_id']}"
 
 
-def texto_relatorio() -> str:
+def _cor_status(t: dict) -> str:
+    """🟢 pago · 🟡 em espera/gerando PIX · 🔴 não pago (expirou, falhou, timeout...)."""
+    status = (t.get("status") or "").upper()
+    if status == "PAID_OUT":
+        return "🟢"
+    if status == "REFUNDED":
+        return "🟣"
+    if status == "PENDING":
+        try:
+            idade_min = (datetime.utcnow() - datetime.fromisoformat(t["criado_em"])).total_seconds() / 60
+        except Exception:
+            idade_min = 0
+        return "🟡" if idade_min <= PENDENTE_MAX_MIN else "🔴"
+    return "🔴"
+
+
+def texto_relatorio(pagina: int = 0):
+    """Retorna (texto, pagina_ajustada, total_paginas). A lista completa fica num
+    blockquote expansível e é paginada pra nunca estourar o limite de 4096 do Telegram."""
     resumo = resumo_vendas()
-    total_np, nao_pagas = transacoes_nao_pagas(limite=15)
+    todas = listar_transacoes()
+    cores = [_cor_status(t) for t in todas]
+    em_espera = cores.count("🟡")
+    nao_pagos = cores.count("🔴")
+
     texto = card(
         "Relatório de vendas",
         {
             "Vendas confirmadas": resumo["quantidade"],
             "Total arrecadado": f"R$ {resumo['total']:.2f}",
-            "PIX gerados e não pagos": total_np,
+            "PIX gerados e não pagos": f"{em_espera + nao_pagos}  (🟡 {em_espera} em espera · 🔴 {nao_pagos} não pagos)",
         },
         emoji="📊",
     )
-    if nao_pagas:
+
+    total_paginas = max(1, -(-len(todas) // RELATORIO_POR_PAGINA))
+    pagina = max(0, min(pagina, total_paginas - 1))
+
+    if todas:
+        inicio = pagina * RELATORIO_POR_PAGINA
         linhas = []
-        for t in nao_pagas:
+        for t, cor in zip(todas[inicio:inicio + RELATORIO_POR_PAGINA], cores[inicio:inicio + RELATORIO_POR_PAGINA]):
             plano = f" · {html.escape(t['produto_id'])}" if t.get("produto_id") else ""
             linhas.append(
-                f"{status_emoji(t['status'])} {_quem_gerou(t)} — R$ {t['valor']:.2f}{plano} "
-                f"(<code>{t['chat_id']}</code>)"
+                f"{cor} {_quem_gerou(t)} — R$ {t['valor']:.2f}{plano} (<code>{t['chat_id']}</code>)"
             )
-        texto += "\n\n<b>Não pagos (mais recentes):</b>\n" + "\n".join(linhas)
-        if total_np > len(nao_pagas):
-            texto += f"\n… e mais {total_np - len(nao_pagas)}"
-    return texto
+        titulo = f"PIX gerados (mais recentes) — {len(todas)} no total"
+        if total_paginas > 1:
+            titulo += f" · página {pagina + 1}/{total_paginas}"
+        texto += (
+            f"\n\n🟢 pago · 🟡 em espera · 🔴 não pago\n\n<b>{titulo}</b>\n"
+            "<blockquote expandable>" + "\n".join(linhas) + "</blockquote>"
+        )
+    return texto, pagina, total_paginas
 
 
 # === Teclados: funil VIP ===
@@ -562,11 +605,12 @@ def registrar_handlers(bot):
         if not _is_admin(messagem.from_user.id):
             bot.send_message(messagem.chat.id, "❌ Comando restrito.")
             return
+        texto, pagina, total = texto_relatorio(0)
         bot.send_message(
             messagem.chat.id,
-            texto_relatorio(),
+            texto,
             parse_mode="HTML",
-            reply_markup=teclado_relatorio(),
+            reply_markup=teclado_relatorio(pagina, total),
         )
 
     @bot.message_handler(commands=['postar', 'pastar', 'postarvip'])
@@ -699,15 +743,25 @@ def registrar_handlers(bot):
             print(f"Erro ao simular pagamento ({id_transaction}): {resp.status_code} {resp.text}")
             bot.answer_callback_query(call.id, "❌ Erro ao simular", show_alert=True)
 
-    @bot.callback_query_handler(func=lambda call: call.data == "refresh_relatorio")
+    @bot.callback_query_handler(
+        func=lambda call: call.data == "refresh_relatorio" or call.data.startswith("relatorio_pag:")
+    )
     def cb_refresh_relatorio(call):
+        if not _is_admin(call.from_user.id):
+            bot.answer_callback_query(call.id, "❌ Comando restrito.", show_alert=True)
+            return
+        try:
+            pagina_pedida = int(call.data.split(":", 1)[1]) if ":" in call.data else 0
+        except ValueError:
+            pagina_pedida = 0
+        texto, pagina, total = texto_relatorio(pagina_pedida)
         try:
             bot.edit_message_text(
-                texto_relatorio(), call.message.chat.id, call.message.message_id,
-                parse_mode="HTML", reply_markup=teclado_relatorio(),
+                texto, call.message.chat.id, call.message.message_id,
+                parse_mode="HTML", reply_markup=teclado_relatorio(pagina, total),
             )
         except Exception:
-            pass
+            pass  # "message is not modified" quando nada mudou
         bot.answer_callback_query(call.id, "Relatório atualizado ✅")
 
     def _enviar_pix_vip(chat_id, tier, id_transaction, codigo, qr_base64, sandbox, is_admin, reaproveitado=False):
